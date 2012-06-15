@@ -1,0 +1,182 @@
+#!/usr/bin/env ruby
+# encoding: utf-8
+
+require 'rubygems'
+require 'commander/import'
+require 'mail-iso-2022-jp'
+require 'fileutils'
+require 'shellwords'
+
+program :version, '0.1.0'
+program :description, 'Sends task-report mail'
+
+first_name = '裕'
+last_name = '桑原'
+email = 'kuwabara@clisk.com'
+editor = 'vim'
+
+report_encoding = 'ISO-2022-JP'
+report_from = "#{last_name} #{first_name}<#{email}>"
+report_to = 'kuwabara@clisk.com'
+report_subject = "[日報] #{last_name} #{first_name}"
+report_draft = ".task_report_draft"
+draft_dir = "~"
+dingbat = '■'
+headings = {
+  :done => '今日やったこと',
+  :todo => '今後やること',
+  :share => '気づき・共有',
+  :tweet => '今日のひとこと'
+}
+todo_regex = Regexp.new("(#{dingbat}#{headings[:todo]})(.*)(#{dingbat}#{headings[:share]})", Regexp::MULTILINE)
+share_regex = Regexp.new("(#{dingbat}#{headings[:share]})(.*)(#{dingbat}#{headings[:tweet]})", Regexp::MULTILINE)
+path = File.expand_path(report_draft, draft_dir)
+
+get_todo_section = lambda do
+  (IO.read(path).match(todo_regex) || [])[2].strip.gsub(/^ +/, '')
+end
+
+get_share_section = lambda do
+  (IO.read(path).match(share_regex) || [])[2].strip.gsub(/^ +/, '')
+end
+
+get_default_report = lambda do |name, todo|
+  default = <<-END.gsub(/^ +/, '')
+    各位
+
+    お疲れさまです。#{name}です。
+    本日の日報を送付いたします。
+
+    #{dingbat}#{headings[:done]}
+
+    #{dingbat}#{headings[:todo]}
+    #{todo}
+    #{dingbat}#{headings[:share]}
+
+    #{dingbat}#{headings[:tweet]}
+  END
+end
+
+reset_draft = lambda do
+  File.open(path, 'w') do |f|
+    f << get_default_report.call(last_name, get_todo_section.call())
+  end
+end
+
+FileUtils.touch(path)
+if File.zero?(path)
+  reset_draft.call()
+end
+
+command :send do |c|
+  c.syntax = ' send [options]'
+  c.summary = ''
+  c.description = ''
+  c.example 'description', 'command example'
+  c.option '--some-switch', 'Some switch that does something'
+  c.action do |args, options|
+    report = IO.read(path).gsub(/  /, '　')
+    puts report
+    puts "\n"
+
+    return nil unless agree('Do you want to send?')
+
+    reset_draft.call()
+
+    smtp_settings = {
+      :address => 'smtp.gmail.com',
+      :port => 587,
+      :domain => 'clisk.com',
+      :user_name => email,
+      :password => ask('mail password: ') { |q| q.echo = false },
+      :authentication => 'plain',
+      :enable_starttls_auto => true
+    }
+
+    Mail.defaults do
+      delivery_method :smtp, smtp_settings
+    end
+
+    mail = Mail.new(:charset => encoding) do
+      from    report_from
+      to      report_to
+      subject report_subject
+      body    report
+    end
+
+    #TODO: rescue or something error handling
+    puts mail.deliver
+  end
+end
+
+command :show do |c|
+  c.syntax = ' show [options]'
+  c.summary = ''
+  c.description = 'view draft'
+  c.action do |args, options|
+    puts IO.read(path)
+  end
+end
+
+command :todo do |c|
+  c.syntax = ' todo [options]'
+  c.summary = ''
+  c.description = 'write todo'
+  c.action do |args, options|
+    tmp = Tempfile.new('todo')
+    begin
+      tmp.write(get_todo_section.call())
+      tmp.close
+      args = Shellwords.shellwords(editor)
+      args << tmp.path
+      Kernel::system(*args)
+      tmp.open
+      todo = tmp.read.gsub(/^/, '  ').gsub(/ +$/, '')
+    ensure
+      tmp.close
+      tmp.unlink
+    end
+
+    update = IO.read(path).sub(todo_regex, "\\1\n#{todo}\n\\3")
+    File.open(path, 'w') do |f|
+      f << update
+    end
+  end
+end
+
+command :share do |c|
+  c.syntax = ' share [options]'
+  c.summary = ''
+  c.description = 'write share'
+  c.action do |args, options|
+    tmp = Tempfile.new('share')
+    begin
+      tmp.write(get_share_section.call())
+      tmp.close
+      args = Shellwords.shellwords(editor)
+      args << tmp.path
+      Kernel::system(*args)
+      tmp.open
+      share = tmp.read.gsub(/^/, '  ').gsub(/ +$/, '')
+    ensure
+      tmp.close
+      tmp.unlink
+    end
+
+    update = IO.read(path).sub(share_regex, "\\1\n#{share}\n\\3")
+    File.open(path, 'w') do |f|
+      f << update
+    end
+  end
+end
+
+command :write do |c|
+  c.syntax = ' write [options]'
+  c.summary = ''
+  c.description = 'write draft'
+  c.action do |args, options|
+    args = Shellwords.shellwords(editor)
+    args << path
+    Kernel::system(*args)
+  end
+end
