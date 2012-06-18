@@ -10,85 +10,133 @@ require 'shellwords'
 program :version, '0.1.0'
 program :description, 'Sends task-report mail'
 
-first_name = '裕'
-last_name = '桑原'
-email = 'kuwabara@clisk.com'
-editor = 'vim'
-
-report_encoding = 'ISO-2022-JP'
-report_from = "#{last_name} #{first_name}<#{email}>"
-report_to = 'kuwabara@clisk.com'
-report_subject = "[日報] #{last_name} #{first_name}"
-report_draft = ".task_report_draft"
-draft_dir = "~"
-dingbat = '■'
-headings = {
-  :done => '今日やったこと',
-  :todo => '今後やること',
-  :share => '気づき・共有',
-  :tweet => '今日のひとこと'
-}
-todo_regex = Regexp.new("(#{dingbat}#{headings[:todo]})(.*)(#{dingbat}#{headings[:share]})", Regexp::MULTILINE)
-share_regex = Regexp.new("(#{dingbat}#{headings[:share]})(.*)(#{dingbat}#{headings[:tweet]})", Regexp::MULTILINE)
-path = File.expand_path(report_draft, draft_dir)
-
-get_todo_section = lambda do
-  (IO.read(path).match(todo_regex) || [])[2].strip.gsub(/^ +/, '')
-end
-
-get_share_section = lambda do
-  (IO.read(path).match(share_regex) || [])[2].strip.gsub(/^ +/, '')
-end
-
-get_default_report = lambda do |name, todo|
-  default = <<-END.gsub(/^ +/, '')
-    各位
-
-    お疲れさまです。#{name}です。
-    本日の日報を送付いたします。
-
-    #{dingbat}#{headings[:done]}
-
-    #{dingbat}#{headings[:todo]}
-    #{todo}
-    #{dingbat}#{headings[:share]}
-
-    #{dingbat}#{headings[:tweet]}
-  END
-end
-
-reset_draft = lambda do
-  File.open(path, 'w') do |f|
-    f << get_default_report.call(last_name, get_todo_section.call())
+def init()
+  TaskReport.new do
+    @first_name = '裕'
+    @last_name = '桑原'
+    @email = 'kuwabara@clisk.com'
   end
 end
 
-FileUtils.touch(path)
-if File.zero?(path)
-  reset_draft.call()
-end
+class TaskReport
+  attr_accessor :test
 
-command :send do |c|
-  c.syntax = ' send [options]'
-  c.summary = ''
-  c.description = ''
-  c.example 'description', 'command example'
-  c.option '--some-switch', 'Some switch that does something'
-  c.action do |args, options|
-    report = IO.read(path).gsub(/  /, '　')
-    puts report
-    puts "\n"
+  def initialize(&block)
+    instance_eval(&block) if block_given?
 
-    return nil unless agree('Do you want to send?')
+    @editor = "vim -c 'set shiftwidth=2 tabstop=2'"
+    @encoding = 'ISO-2022-JP'
+    @from = "#{@last_name} #{@first_name} <#{@email}>"
+    @to = 'task-report-jp@clisk.com'
+    @subject = "[日報] #{@last_name} #{@first_name}"
+    @dingbat = '■'
+    @headings = {
+      :done => '今日やったこと',
+      :todo => '今後やること',
+      :share => '気づき・共有',
+      :tweet => '今日のひとこと'
+    }
 
-    reset_draft.call()
+    @path = File.expand_path('.task_report_draft', '~')
+    FileUtils.touch(@path)
+    self.load
+    self.save
+  end
 
+  def load()
+    data = {
+      :done => "",
+      :todo => "",
+      :share => "",
+      :tweet => "",
+      :memo => ""
+    }
+
+    current_section = nil
+    File.new(@path).each do |line|
+      symbol = line.strip.gsub(/:/, '').to_sym
+      if data.has_key?(symbol)
+        current_section = symbol
+      else
+        data[current_section] += line unless current_section.nil?
+      end
+    end
+
+    @data = data
+  end
+
+  def save()
+    File.open(@path, 'w') do |file|
+      file << self.serialize
+    end
+
+    self
+  end
+
+  def serialize()
+    @data.map do |k, v|
+      ":::#{k.to_s}\n#{v}"
+    end.join()
+  end
+
+  def edit(section)
+    if !section.nil? and @data.has_key?(section.to_sym)
+      tmp = Tempfile.new(section.to_s)
+      begin
+        tmp.write(@data[section.to_sym])
+        tmp.close
+        args = Shellwords.shellwords(@editor)
+        args << tmp.path
+        Kernel::system(*args)
+        tmp.open
+        update = tmp.read.gsub(/ +$/, '')
+      ensure
+        tmp.close
+        tmp.unlink
+      end
+
+      @data[section.to_sym] = update
+    else
+      args = Shellwords.shellwords(@editor)
+      args << @path
+      Kernel::system(*args)
+      self.load
+    end
+
+    self
+  end
+
+  def format()
+    format = <<-END
+各位
+
+お疲れさまです。#{@last_name}です。
+本日の日報を送付いたします。
+
+#{@dingbat}#{@headings[:done]}
+#{@data[:done].strip.gsub(/^/, '  ').gsub(/ +$/, '')}
+
+#{@dingbat}#{@headings[:todo]}
+#{@data[:todo].strip.gsub(/^/, '  ').gsub(/ +$/, '')}
+
+#{@dingbat}#{@headings[:share]}
+#{@data[:share].strip.gsub(/^/, '  ').gsub(/ +$/, '')}
+
+#{@dingbat}#{@headings[:tweet]}
+#{@data[:tweet].strip.gsub(/^/, '  ').gsub(/ +$/, '')}
+
+    END
+
+    format.gsub(/  /, '　')
+  end
+
+  def send(password)
     smtp_settings = {
       :address => 'smtp.gmail.com',
       :port => 587,
       :domain => 'clisk.com',
-      :user_name => email,
-      :password => ask('mail password: ') { |q| q.echo = false },
+      :user_name => @email,
+      :password => password,
       :authentication => 'plain',
       :enable_starttls_auto => true
     }
@@ -97,86 +145,118 @@ command :send do |c|
       delivery_method :smtp, smtp_settings
     end
 
-    mail = Mail.new(:charset => encoding) do
+    report_from = @from
+    report_to = @test ? @from : @to
+    report_subject = @subject
+    report_body = self.format
+    mail = Mail.new(:charset => @encoding) do
       from    report_from
       to      report_to
       subject report_subject
-      body    report
+      body    report_body
     end
 
     #TODO: rescue or something error handling
     puts mail.deliver
   end
+
+  def flush()
+    @data = {
+      :done => "\n",
+      :todo => @data[:todo],
+      :share => "\n",
+      :tweet => "\n",
+      :memo => @data[:memo]
+    } unless @test
+
+    self
+  end
 end
 
-command :show do |c|
-  c.syntax = ' show [options]'
+default_command :read
+
+command :read do |c|
+  c.syntax = ' read [options]'
   c.summary = ''
   c.description = 'view draft'
   c.action do |args, options|
-    puts IO.read(path)
+    puts init().format
+  end
+end
+
+command :edit do |c|
+  c.syntax = ' edit [options] [section]'
+  c.summary = ''
+  c.description = 'edit report draft'
+  c.action do |args, options|
+    section = args[0]
+    init().edit(section).save
+  end
+end
+
+command :done do |c|
+  c.syntax = ' done'
+  c.summary = ''
+  c.description = 'edit report section done'
+  c.action do |args, options|
+    init().edit(:done).save
   end
 end
 
 command :todo do |c|
-  c.syntax = ' todo [options]'
+  c.syntax = ' todo'
   c.summary = ''
-  c.description = 'write todo'
+  c.description = 'edit report section todo'
   c.action do |args, options|
-    tmp = Tempfile.new('todo')
-    begin
-      tmp.write(get_todo_section.call())
-      tmp.close
-      args = Shellwords.shellwords(editor)
-      args << tmp.path
-      Kernel::system(*args)
-      tmp.open
-      todo = tmp.read.gsub(/^/, '  ').gsub(/ +$/, '')
-    ensure
-      tmp.close
-      tmp.unlink
-    end
-
-    update = IO.read(path).sub(todo_regex, "\\1\n#{todo}\n\\3")
-    File.open(path, 'w') do |f|
-      f << update
-    end
+    init().edit(:todo).save
   end
 end
 
 command :share do |c|
-  c.syntax = ' share [options]'
+  c.syntax = ' share'
   c.summary = ''
-  c.description = 'write share'
+  c.description = 'edit report section share'
   c.action do |args, options|
-    tmp = Tempfile.new('share')
-    begin
-      tmp.write(get_share_section.call())
-      tmp.close
-      args = Shellwords.shellwords(editor)
-      args << tmp.path
-      Kernel::system(*args)
-      tmp.open
-      share = tmp.read.gsub(/^/, '  ').gsub(/ +$/, '')
-    ensure
-      tmp.close
-      tmp.unlink
-    end
-
-    update = IO.read(path).sub(share_regex, "\\1\n#{share}\n\\3")
-    File.open(path, 'w') do |f|
-      f << update
-    end
+    init().edit(:share).save
   end
 end
 
-command :write do |c|
-  c.syntax = ' write [options]'
+command :tweet do |c|
+  c.syntax = ' tweet'
   c.summary = ''
-  c.description = 'write draft'
+  c.description = 'edit report section tweet'
   c.action do |args, options|
-    args = Shellwords.shellwords(editor)
-    args << path
-    Kernel::system(*args)
+    init().edit(:tweet).save
+  end
+end
+
+command :memo do |c|
+  c.syntax = ' memo'
+  c.summary = ''
+  c.description = 'edit report section memo'
+  c.action do |args, options|
+    init().edit(:memo).save
+  end
+end
+
+command :send do |c|
+  c.syntax = ' send [options]'
+  c.summary = ''
+  c.description = ''
+  c.example 'description', 'command example'
+  c.option '--test'
+  c.action do |args, options|
+    report = init()
+    puts report.format
+    puts "\n"
+
+    if (options.test)
+      report.test = true
+    end
+
+    if agree('Do you want to send? [y / n]')
+      report.send ask('mail password: ') { |q| q.echo = false }
+      report.flush.save
+    end
   end
 end
